@@ -1,45 +1,65 @@
-#[derive(Debug, Clone)]
-enum RPSOptions {
-    Rock,
-    Paper,
-    Scissors,
+mod client;
+mod game;
+mod server;
+
+use std::io::Error as IoError;
+use structopt::StructOpt;
+
+#[derive(Debug, StructOpt)]
+pub struct ServerOptions {
+    #[structopt(long, default_value = "127.0.0.1:12345")]
+    pub server_listen_addr: String,
 }
 
-#[derive(Debug)]
-struct Player {
-    id: u8,
-    hand: RPSOptions,
+#[derive(Debug, StructOpt)]
+pub struct ServerRoomCode {
+    room_code: String,
 }
 
-fn main() {
-    let player1 = Player {
-        id: 1,
-        hand: RPSOptions::Rock,
+#[derive(Debug, StructOpt)]
+pub enum ClientMode {
+    Host,
+    Join(ServerRoomCode),
+}
+
+#[derive(Debug, StructOpt)]
+pub struct ClientOptions {
+    #[structopt(long, default_value = "ws://127.0.0.1:12345")]
+    pub server_addr: String,
+    #[structopt(subcommand)]
+    pub client_mode: ClientMode,
+}
+
+#[derive(Debug, StructOpt)]
+enum AppMode {
+    Server(ServerOptions),
+    Client(ClientOptions),
+}
+
+#[derive(Debug, StructOpt)]
+struct ApplicationArguments {
+    #[structopt(flatten)]
+    pub app_mode: AppMode,
+}
+
+#[tokio::main]
+async fn main() -> Result<(), IoError> {
+    let args = ApplicationArguments::from_args();
+
+    let exit_result = match args.app_mode {
+        AppMode::Server(server_opts) => {
+            println!("Start server on: {:?}", server_opts.server_listen_addr);
+            server::start_server(server_opts).await;
+        }
+        AppMode::Client(client_opts) => {
+            // TODO: Handle host vs join mode. ALL_CAPS the room code
+            println!(
+                "Connect to server in {:?} mode at: {:?}",
+                client_opts.client_mode, client_opts.server_addr
+            );
+            client::client_connect(client_opts).await;
+        }
     };
-    let player2 = Player {
-        id: 2,
-        hand: RPSOptions::Rock,
-    };
 
-    println!("The winner is: {:?}", rps_winner(player1, player2));
-}
-
-fn rps_winner(p1: Player, p2: Player) -> Player {
-    match (p1.hand.clone(), p2.hand.clone()) {
-        (RPSOptions::Rock, RPSOptions::Rock)
-        | (RPSOptions::Paper, RPSOptions::Paper)
-        | (RPSOptions::Scissors, RPSOptions::Scissors) => Player {
-            id: 0,
-            hand: RPSOptions::Rock,
-        },
-
-        (RPSOptions::Rock, RPSOptions::Paper) => p2,
-        (RPSOptions::Rock, RPSOptions::Scissors) => p1,
-
-        (RPSOptions::Paper, RPSOptions::Rock) => p1,
-        (RPSOptions::Paper, RPSOptions::Scissors) => p2,
-
-        (RPSOptions::Scissors, RPSOptions::Rock) => p2,
-        (RPSOptions::Scissors, RPSOptions::Paper) => p1,
-    }
+    Ok(exit_result)
 }
