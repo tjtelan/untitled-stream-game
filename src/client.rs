@@ -19,19 +19,23 @@ pub async fn client_connect(opts: ClientOptions) {
     let (stdin_tx, stdin_rx) = futures_channel::mpsc::unbounded();
 
     let client_state = match opts.client_mode {
-        ClientMode::Host => game::GameMessage {
+        ClientMode::Host => game::GamePlayer {
+            user_name: opts.player_name,
             user_type: game::UserMode::GameHost,
             room_code: None,
+            peer_addr: None,
         },
-        ClientMode::Join(ref room_code) => game::GameMessage {
+        ClientMode::Join(ref room_code) => game::GamePlayer {
+            user_name: opts.player_name,
             user_type: game::UserMode::GamePlayer,
             room_code: Some(room_code.room_code.clone()),
+            peer_addr: None,
         },
     };
 
-    //let client_state_async = Arc::new(Mutex::new(client_state));
+    let client_state_async = Arc::new(Mutex::new(client_state));
 
-    tokio::spawn(read_stdin(client_state, stdin_tx));
+    tokio::spawn(read_stdin(client_state_async.clone(), stdin_tx));
 
     let (ws_stream, _) = connect_async(url).await.expect("Failed to connect");
     println!("WebSocket handshake has been successfully completed");
@@ -39,16 +43,36 @@ pub async fn client_connect(opts: ClientOptions) {
     let (write, read) = ws_stream.split();
 
     let stdin_to_ws = stdin_rx.map(Ok).forward(write);
+
+    // From the server
     let ws_to_stdout = {
         read.for_each(|message| async {
-            let data = message.unwrap().into_data();
+            let incoming_data = message.unwrap().into_data();
 
-            let data =
-                serde_json::from_str::<game::GameMessage>(str::from_utf8(&data).unwrap()).unwrap();
+            //let incoming_data =
+            //    serde_json::from_str::<game::GamePlayer>(str::from_utf8(&incoming_data).unwrap())
+            //        .unwrap();
 
-            println!("data: {:?}", data);
-            //tokio::io::stdout().write_all(&data).await.unwrap();
-            //tokio::io::stdout().write_all(format!("{:?}", data).as_bytes()).await.unwrap();
+            match serde_json::from_str::<game::GameMessageType>(
+                str::from_utf8(&incoming_data).unwrap(),
+            )
+            .unwrap()
+            {
+                game::GameMessageType::NewPlayer(data) => {
+                    println!("incoming_data: {:?}", data);
+
+                    let mut state = client_state_async.lock().unwrap();
+
+                    // This is intended to only be set when a client initially connects
+                    if *state.user_name == data.user_name {
+                        println!("Setting data from server");
+                        *state = data;
+                    }
+                }
+                game::GameMessageType::AllPlayers(all_players) => {
+                    println!("allplayers: {:?}", all_players)
+                }
+            }
         })
     };
 
@@ -59,18 +83,27 @@ pub async fn client_connect(opts: ClientOptions) {
 // TODO: Rename read_stdin to something more meaningful in our case
 // Our helper method which will read data from stdin and send it along the
 // sender provided.
-async fn read_stdin(client: game::GameMessage, tx: futures_channel::mpsc::UnboundedSender<Message>) {
+async fn read_stdin(
+    client: Arc<Mutex<game::GamePlayer>>,
+    tx: futures_channel::mpsc::UnboundedSender<Message>,
+) {
     let mut stdin = tokio::io::stdin();
-    //let mut game_msg = match client.client_mode {
-    //    ClientMode::Host => game::GameMessage {
-    //        user_type: game::UserMode::GameHost,
-    //        room_code: None,
-    //    },
-    //    ClientMode::Join(ref room_code) => game::GameMessage {
-    //        user_type: game::UserMode::GamePlayer,
-    //        room_code: Some(room_code.room_code.clone()),
-    //    },
-    //};
+
+    {
+        let init_connect = client.lock().unwrap();
+
+        if init_connect.room_code.is_none() || init_connect.peer_addr.is_none() {
+            println!("Prompt server to return server-state info");
+            tx.unbounded_send(Message::binary(
+                serde_json::to_string(&game::GameMessageType::NewPlayer(init_connect.clone()))
+                    .unwrap(),
+            ))
+            .unwrap();
+        }
+
+        drop(init_connect);
+    }
+
     loop {
         let mut buf = vec![0; 1024];
         let n = match stdin.read(&mut buf).await {
@@ -78,8 +111,12 @@ async fn read_stdin(client: game::GameMessage, tx: futures_channel::mpsc::Unboun
             Ok(n) => n,
         };
         buf.truncate(n);
-        //tx.unbounded_send(Message::binary(format!("{:?}", game_msg)))
-        tx.unbounded_send(Message::binary(serde_json::to_string(&client).unwrap()))
-            .unwrap();
+        tx.unbounded_send(Message::binary(
+            serde_json::to_string(&&game::GameMessageType::NewPlayer(
+                client.lock().unwrap().clone(),
+            ))
+            .unwrap(),
+        ))
+        .unwrap();
     }
 }

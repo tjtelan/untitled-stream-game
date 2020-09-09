@@ -1,18 +1,35 @@
 use rand::distributions::Alphanumeric;
 use rand::{thread_rng, Rng};
 use serde::{Deserialize, Serialize};
-use std::iter;
+use std::{
+    collections::HashMap,
+    iter,
+    net::SocketAddr,
+    sync::{Arc, Mutex},
+};
 
-#[derive(Debug, Serialize, Deserialize)]
+pub type GameLobby = Arc<Mutex<HashMap<String, Vec<GamePlayer>>>>;
+pub type GameHosts = Arc<Mutex<HashMap<SocketAddr, String>>>;
+
+#[derive(Debug, Serialize, Deserialize, Clone)]
+pub enum GameMessageType {
+    NewPlayer(GamePlayer),
+    AllPlayers(Vec<GamePlayer>),
+}
+
+#[derive(Debug, Serialize, Deserialize, Clone)]
 pub enum UserMode {
     GameHost,
     GamePlayer,
 }
 
-#[derive(Debug, Serialize, Deserialize)]
-pub struct GameMessage {
+#[derive(Debug, Serialize, Deserialize, Clone)]
+pub struct GamePlayer {
+    pub user_name: String,
     pub user_type: UserMode,
     pub room_code: Option<String>,
+    pub peer_addr: Option<SocketAddr>,
+    // channel tx?
 }
 
 pub fn generate_room_code() -> String {

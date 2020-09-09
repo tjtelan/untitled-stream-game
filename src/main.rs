@@ -28,6 +28,7 @@ pub struct ClientOptions {
     pub server_addr: String,
     #[structopt(subcommand)]
     pub client_mode: ClientMode,
+    pub player_name: String,
 }
 
 #[derive(Debug, StructOpt)]
