@@ -12,11 +12,14 @@ use warp::ws::{Message, WebSocket};
 use warp::Filter;
 
 use serde::{Deserialize, Serialize};
-//use serde_json::Value;
+use serde_json::json;
 
 use log::info;
 
-use rand::{distributions::Alphanumeric, thread_rng, Rng};
+use rand::{
+    distributions::{Alphanumeric, Distribution, Standard},
+    thread_rng, Rng,
+};
 
 /// Our global unique user id counter.
 static NEXT_USER_ID: AtomicUsize = AtomicUsize::new(1);
@@ -27,20 +30,58 @@ static NEXT_USER_ID: AtomicUsize = AtomicUsize::new(1);
 /// - Value is a sender of `warp::ws::Message`
 type Users = Arc<RwLock<HashMap<usize, mpsc::UnboundedSender<Result<Message, warp::Error>>>>>;
 
-type Games = Arc<RwLock<HashMap<String, Vec<UserServerSideState>>>>;
+type Games = Arc<RwLock<HashMap<String, GameLobbyState>>>;
 
 #[derive(Deserialize, Serialize, Debug)]
-struct GameLobbyResponse {
-    room_code: String,
-    users: Vec<String>,
+enum GameLobbyResponse {
+    PartyUpdate {
+        room_code: String,
+        users: Vec<String>,
+    },
+    GameStart {
+        room_code: String,
+    },
+    ServerHand {
+        hand: RPSHand,
+    },
 }
 
 #[derive(Deserialize, Serialize, Debug)]
-#[serde(untagged)]
-enum ClientMsgRequest {
-    UserLogin(UserReq),
-    HostNewGame(HostReq),
-    //StartGame(UserReq)
+enum GameLobbyRequest {
+    UserLogin {
+        user_name: String,
+        user_type: UserType,
+        room_code: String,
+    },
+    HostNewGame {
+        user_name: String,
+        user_type: UserType,
+    },
+    HostStartGame {
+        room_code: String,
+    },
+    PlayerHand {
+        user_name: String,
+        room_code: String,
+        hand: RPSHand,
+    },
+}
+
+#[derive(Deserialize, Serialize, Debug, Clone)]
+enum RPSHand {
+    Rock,
+    Paper,
+    Scissors,
+}
+
+impl Distribution<RPSHand> for Standard {
+    fn sample<R: Rng + ?Sized>(&self, rng: &mut R) -> RPSHand {
+        match rng.gen_range(0, 3) {
+            0 => RPSHand::Rock,
+            1 => RPSHand::Paper,
+            _ => RPSHand::Scissors,
+        }
+    }
 }
 
 #[derive(Deserialize, Serialize, Debug, Clone)]
@@ -49,17 +90,10 @@ enum UserType {
     Player,
 }
 
-#[derive(Deserialize, Serialize, Debug)]
-struct HostReq {
-    user_name: String,
-    user_type: UserType,
-}
-
-#[derive(Deserialize, Serialize, Debug, Clone)]
-struct UserReq {
-    user_name: String,
-    user_type: UserType,
-    room_code: String,
+#[derive(Debug, Clone, Default)]
+struct GameLobbyState {
+    game_started: bool,
+    users: Vec<UserServerSideState>,
 }
 
 #[derive(Debug, Clone)]
@@ -67,9 +101,9 @@ struct UserServerSideState {
     user_id: usize,
     user_name: String,
     user_type: UserType,
-    //room_code: String,
     connected: bool,
     channel: Option<mpsc::UnboundedSender<Result<Message, warp::Error>>>,
+    // score: usize,
 }
 
 #[tokio::main]
@@ -133,8 +167,6 @@ async fn user_connected(ws: WebSocket, users: Users, games: Games) {
     let users2 = users.clone();
     let games2 = games.clone();
 
-    let mut room_code = String::new();
-
     // Every time the user sends a message, broadcast it to
     // all other users...
     while let Some(result) = user_ws_rx.next().await {
@@ -150,45 +182,35 @@ async fn user_connected(ws: WebSocket, users: Users, games: Games) {
         // Skip any non-Text messages...
         if let Ok(s) = msg.to_str() {
             match serde_json::from_str(s).unwrap() {
-                ClientMsgRequest::HostNewGame(login_info) => {
+                GameLobbyRequest::HostNewGame {
+                    user_name,
+                    user_type,
+                } => {
                     // Generate a room code
                     // Add host to game
 
-                    room_code = generate_room_code();
+                    //let mut game_lobby_state = GameLobbyState::default();
+                    let room_code = generate_room_code();
 
                     games
                         .write()
                         .await
                         .entry(room_code.clone())
-                        .or_insert(Vec::new());
+                        .or_insert(GameLobbyState::default());
 
                     games
                         .write()
                         .await
                         .entry(room_code.clone())
                         .and_modify(|e| {
-                            e.push(UserServerSideState {
+                            e.users.push(UserServerSideState {
                                 user_id: my_id,
-                                user_name: login_info.user_name,
-                                user_type: login_info.user_type,
+                                user_name: user_name,
+                                user_type: user_type,
                                 connected: true,
                                 channel: Some(tx.clone()),
                             })
                         });
-                    //games.write().await.insert(room_code.clone(), Vec::new());
-
-                    //games
-                    //    .write()
-                    //    .await
-                    //    .get_mut(&room_code)
-                    //    .unwrap()
-                    //    .push(UserServerSideState {
-                    //        user_id: my_id,
-                    //        user_name: login_info.user_name,
-                    //        user_type: login_info.user_type,
-                    //        connected: true,
-                    //        channel: Some(tx.clone()),
-                    //    });
 
                     info!("New host creating game. Room code: {}", &room_code);
 
@@ -206,23 +228,18 @@ async fn user_connected(ws: WebSocket, users: Users, games: Games) {
                     // start_game()
                 }
 
-                ClientMsgRequest::UserLogin(login_info) => {
-                    info!(
-                        "New user joining room {}",
-                        &login_info.room_code.to_uppercase()
-                    );
+                GameLobbyRequest::UserLogin {
+                    user_name,
+                    user_type,
+                    room_code,
+                } => {
+                    info!("New user joining room {}", &room_code.to_uppercase());
 
                     // Check for the existence of the room code in games
                     // if it doesn't exist, then send a message back to the user and then close the channel...
-                    if !games
-                        .read()
-                        .await
-                        .contains_key(&login_info.room_code.to_uppercase())
-                    {
-                        let error_msg = format!(
-                            "Room code: {} does not exist",
-                            &login_info.room_code.to_uppercase()
-                        );
+                    if !games.read().await.contains_key(&room_code.to_uppercase()) {
+                        let error_msg =
+                            format!("Room code: {} does not exist", &room_code.to_uppercase());
 
                         eprintln!("{}", &error_msg);
 
@@ -238,32 +255,15 @@ async fn user_connected(ws: WebSocket, users: Users, games: Games) {
 
                         info!("Adding new user into game room");
 
-                        // TODO: What I should do it look for a user of the same name first, and modify that record. Otherwise push new
-                        //if let Some(u) = games
-                        //    .write()
-                        //    .await
-                        //    .get_mut(&login_info.room_code.to_uppercase())
-                        //{
-                        //    u.push(UserServerSideState {
-                        //        user_id: my_id,
-                        //        user_name: login_info.clone().user_name,
-                        //        user_type: login_info.clone().user_type,
-                        //        connected: true,
-                        //        channel: Some(tx.clone()),
-                        //    })
-                        //}
-
-                        room_code = login_info.room_code.clone();
-
                         games
                             .write()
                             .await
                             .entry(room_code.clone())
                             .and_modify(|e| {
-                                e.push(UserServerSideState {
+                                e.users.push(UserServerSideState {
                                     user_id: my_id,
-                                    user_name: login_info.clone().user_name,
-                                    user_type: login_info.clone().user_type,
+                                    user_name: user_name,
+                                    user_type: user_type,
                                     connected: true,
                                     channel: Some(tx.clone()),
                                 })
@@ -276,6 +276,20 @@ async fn user_connected(ws: WebSocket, users: Users, games: Games) {
                     game_lobby(my_id, &games, &room_code).await
                     // start_game()
                 }
+
+                GameLobbyRequest::HostStartGame { room_code } => {
+                    println!("Start game for room: {:?}", &room_code);
+                    game_start(&games, room_code).await
+                }
+
+                GameLobbyRequest::PlayerHand {
+                    user_name,
+                    room_code,
+                    hand,
+                } => {
+                    println!("({}) {} played hand: {:?}", room_code, user_name, hand);
+                    server_play_hand(&games, room_code, user_name).await
+                }
             }
         } else {
             return;
@@ -287,36 +301,111 @@ async fn user_connected(ws: WebSocket, users: Users, games: Games) {
     user_disconnected(my_id, &users2, &games2).await;
 }
 
-async fn game_lobby(my_id: usize, games: &Games, room_code: &String) {
+async fn server_play_hand(games: &Games, room_code: String, user_name: String) {
+    let random_hand: RPSHand = rand::random();
+
+    for (room, game_state) in games.read().await.iter() {
+        let all_users: Vec<String> = game_state
+            .users
+            .iter()
+            .map(|u| u.user_name.clone())
+            .collect();
+
+        if room == &room_code {
+            eprintln!("Hopefully about to print to all users in room?");
+            for u in game_state.users.iter() {
+                if u.user_name == user_name {
+                    eprintln!("User: {:?}", u);
+
+                    let resp = GameLobbyResponse::ServerHand {
+                        hand: random_hand.clone(),
+                    };
+
+                    let msg = format!("{}", json!(resp).to_string());
+
+                    if let Some(tx) = u.channel.clone() {
+                        if let Err(_disconnected) = tx.send(Ok(Message::text(msg))) {}
+                    }
+                }
+            }
+        }
+    }
+}
+
+async fn game_start(games: &Games, room_code: String) {
+    games
+        .write()
+        .await
+        .entry(room_code.clone())
+        .and_modify(|e| {
+            e.game_started = true;
+        });
+
+    for (room, game_state) in games.read().await.iter() {
+        let all_users: Vec<String> = game_state
+            .users
+            .iter()
+            .map(|u| u.user_name.clone())
+            .collect();
+
+        if room == &room_code {
+            eprintln!("Hopefully about to print to all users in room?");
+            for u in game_state.users.iter() {
+                eprintln!("User: {:?}", u);
+
+                let resp = GameLobbyResponse::GameStart {
+                    room_code: room_code.clone(),
+                };
+
+                let msg = format!("{}", json!(resp).to_string());
+
+                if let Some(tx) = u.channel.clone() {
+                    if let Err(_disconnected) = tx.send(Ok(Message::text(msg))) {}
+                }
+            }
+        }
+    }
+
+    // Humans vs the server
+    // Best out of 5
+    // Send updates to everyone on the number of turns taken + wins
+
+    // When everyone has completed their turns. Announce winner(s), and allow the host to restart or end
+}
+
+async fn game_lobby(_my_id: usize, games: &Games, room_code: &String) {
     // TODO: Remove this when I've got all the other login stuff established
     //let new_msg = format!("<User#{}>: ", my_id);
 
     //eprintln!("{}", &new_msg);
 
     // loop over the game lobby's set of users and announce the current set of users
-    for (room, users) in games.read().await.iter() {
-
+    for (room, game_state) in games.read().await.iter() {
         eprintln!("({}) Looping through room: {}", room_code, room);
 
-        let all_users : Vec<String> = users.iter().map(|u| u.user_name.clone()).collect();
+        let all_users: Vec<String> = game_state
+            .users
+            .iter()
+            .map(|u| u.user_name.clone())
+            .collect();
 
         if room == room_code {
-
             eprintln!("Hopefully about to print to all users in room?");
-            for u in users.iter() {
-
+            for u in game_state.users.iter() {
                 eprintln!("User: {:?}", u);
 
-                let msg = format!("{:?}", all_users);
+                let resp = GameLobbyResponse::PartyUpdate {
+                    room_code: room.to_string(),
+                    users: all_users.clone(),
+                };
+                let msg = format!("{}", json!(resp).to_string());
 
                 if let Some(tx) = u.channel.clone() {
                     if let Err(_disconnected) = tx.send(Ok(Message::text(msg))) {}
                 }
             }
-
         }
     }
-
 }
 
 async fn user_disconnected(my_id: usize, users: &Users, games: &Games) {

@@ -28,9 +28,20 @@
         </div>
         
         <div id="connected_lobby" style="display:none;">
-            <div id="user_name"></div>
-            <div id="room_code"></div>
+            Name: <div id="user_name"></div>
+            Room code: <div id="room_code"></div>
+            Party members: <div id="party_members"></div>
+            
+            <button type="button" id="host_start_game" style="display:none">Start game</button>
         </div>
+
+
+        <div id="active_game_controls" style="display:none;">
+            <button type="button" id="rock_btn">Rock</button>
+            <button type="button" id="paper_btn">Paper</button>
+            <button type="button" id="scissors_btn">Scissors</button>
+        </div>
+
 
         <script type="text/javascript" src="static/game.js"></script>
     </body>
